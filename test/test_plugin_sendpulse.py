@@ -26,7 +26,7 @@
 # ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 # POSSIBILITY OF SUCH DAMAGE.
 
-from json import dumps
+from json import dumps, loads
 from unittest import mock
 
 import os
@@ -55,10 +55,10 @@ TEST_VAR_DIR = os.path.join(os.path.dirname(__file__), 'var')
 # Our Testing URLs
 apprise_url_tests = (
     ('sendpulse://', {
-        'instance': None,
+        'instance': TypeError,
     }),
     ('sendpulse://:@/', {
-        'instance': None,
+        'instance': TypeError,
     }),
     ('sendpulse://abcd', {
         # invalid from email
@@ -68,7 +68,57 @@ apprise_url_tests = (
         # Just an Email specified, no client_id or client_secret
         'instance': TypeError,
     }),
+    ('sendpulse://user@example.com/client_id/cs/?template=invalid', {
+        # Invalid template
+        'instance': TypeError,
+    }),
+    ('sendpulse://user@example.com/client_id/cs1/?template=123', {
+        'instance': NotifySendPulse,
+        'requests_response_text': SENDPULSE_GOOD_RESPONSE,
+    }),
     ('sendpulse://user@example.com/client_id/cs1/', {
+        'instance': NotifySendPulse,
+        'requests_response_text': SENDPULSE_GOOD_RESPONSE,
+    }),
+    ('sendpulse://user@example.com/client_id/cs1/?format=text', {
+        'instance': NotifySendPulse,
+        'requests_response_text': SENDPULSE_GOOD_RESPONSE,
+    }),
+    ('sendpulse://user@example.com/client_id/cs1/?format=html', {
+        'instance': NotifySendPulse,
+        'requests_response_text': SENDPULSE_GOOD_RESPONSE,
+    }),
+    ('sendpulse://chris@example.com/client_id/cs1/?from=Chris', {
+        # Set name only
+        'instance': NotifySendPulse,
+        'requests_response_text': SENDPULSE_GOOD_RESPONSE,
+    }),
+    ('sendpulse://?id=ci&secret=cs&user=chris@example.com', {
+        # Set login through user= only
+        'instance': NotifySendPulse,
+        'requests_response_text': SENDPULSE_GOOD_RESPONSE,
+    }),
+    ('sendpulse://?id=ci&secret=cs&user=chris', {
+        # Set login through user= only - invaild email
+        'instance': TypeError,
+    }),
+    ('sendpulse://example.com/client_id/cs1/?user=chris', {
+        # Set user as a name only
+        'instance': NotifySendPulse,
+        'requests_response_text': SENDPULSE_GOOD_RESPONSE,
+    }),
+    ('sendpulse://client_id/cs1/?user=chris@example.ca', {
+        # Set user as email
+        'instance': NotifySendPulse,
+        'requests_response_text': SENDPULSE_GOOD_RESPONSE,
+    }),
+    ('sendpulse://client_id/cs1/?from=Chris<chris@example.com>', {
+        # set full email with name
+        'instance': NotifySendPulse,
+        'requests_response_text': SENDPULSE_GOOD_RESPONSE,
+    }),
+    ('sendpulse://?from=Chris<chris@example.com>&id=ci&secret=cs', {
+        # leverage all get params from URL
         'instance': NotifySendPulse,
         'requests_response_text': SENDPULSE_GOOD_RESPONSE,
     }),
@@ -82,31 +132,90 @@ apprise_url_tests = (
      '?bcc=l2g@nuxref.com', {
          # A good email with Blind Carbon Copy
          'instance': NotifySendPulse,
-        'requests_response_text': SENDPULSE_GOOD_RESPONSE,
+         'requests_response_text': SENDPULSE_GOOD_RESPONSE,
+     }),
+    ('sendpulse://user@example.com/client_id/cs2/'
+     '?bcc=invalid', {
+         # A good email with Blind Carbon Copy
+         'instance': NotifySendPulse,
+         'requests_response_text': SENDPULSE_GOOD_RESPONSE,
      }),
     ('sendpulse://user@example.com/client_id/cs3/'
      '?cc=l2g@nuxref.com', {
          # A good email with Carbon Copy
          'instance': NotifySendPulse,
-        'requests_response_text': SENDPULSE_GOOD_RESPONSE,
+         'requests_response_text': SENDPULSE_GOOD_RESPONSE,
      }),
-    ('sendpulse://user@example.com/client_id/cs4/'
-     '?to=l2g@nuxref.com', {
+    ('sendpulse://user@example.com/client_id/cs3/'
+     '?cc=invalid', {
          # A good email with Carbon Copy
          'instance': NotifySendPulse,
+         'requests_response_text': SENDPULSE_GOOD_RESPONSE,
+     }),
+    ('sendpulse://user@example.com/client_id/cs4/'
+     '?to=invalid', {
+         # an invalid to email
+         'instance': NotifySendPulse,
+         'requests_response_text': SENDPULSE_GOOD_RESPONSE,
+     }),
+    ('sendpulse://user@example.com/client_id/cs5/chris@example.com', {
+        # An email with a designated to email
+        'instance': NotifySendPulse,
         'requests_response_text': SENDPULSE_GOOD_RESPONSE,
+    }),
+    ('sendpulse://user@example.com/client_id/cs5/'
+     '?to=Chris<chris@example.com>', {
+         # An email with a full name in in To field
+         'instance': NotifySendPulse,
+         'requests_response_text': SENDPULSE_GOOD_RESPONSE,
      }),
     ('sendpulse://user@example.com/client_id/cs5/'
-     '?template=1234', {
-         # A good email with a template + no substitutions
+     'chris@example.com/chris2@example.com/Test<test@test.com>', {
+         # Several emails to notify
          'instance': NotifySendPulse,
-        'requests_response_text': SENDPULSE_GOOD_RESPONSE,
+         'requests_response_text': SENDPULSE_GOOD_RESPONSE,
+     }),
+    ('sendpulse://user@example.com/client_id/cs5/'
+     '?cc=Chris<chris@example.com>', {
+         # An email with a full name in cc
+         'instance': NotifySendPulse,
+         'requests_response_text': SENDPULSE_GOOD_RESPONSE,
+     }),
+    ('sendpulse://user@example.com/client_id/cs5/'
+     '?cc=chris@example.com', {
+         # An email with a full name in cc
+         'instance': NotifySendPulse,
+         'requests_response_text': SENDPULSE_GOOD_RESPONSE,
+     }),
+    ('sendpulse://user@example.com/client_id/cs5/'
+     '?bcc=Chris<chris@example.com>', {
+         # An email with a full name in bcc
+         'instance': NotifySendPulse,
+         'requests_response_text': SENDPULSE_GOOD_RESPONSE,
+     }),
+    ('sendpulse://user@example.com/client_id/cs5/'
+     '?bcc=chris@example.com', {
+         # An email with a full name in bcc
+         'instance': NotifySendPulse,
+         'requests_response_text': SENDPULSE_GOOD_RESPONSE,
+     }),
+    ('sendpulse://user@example.com/client_id/cs5/'
+     '?to=Chris<chris@example.com>', {
+         # An email with a full name in bcc
+         'instance': NotifySendPulse,
+         'requests_response_text': SENDPULSE_GOOD_RESPONSE,
+     }),
+    ('sendpulse://user@example.com/client_id/cs5/'
+     '?to=chris@example.com', {
+         # An email with a full name in bcc
+         'instance': NotifySendPulse,
+         'requests_response_text': SENDPULSE_GOOD_RESPONSE,
      }),
     ('sendpulse://user@example.com/client_id/cs6/'
      '?template=1234&+sub=value&+sub2=value2', {
          # A good email with a template + substitutions
          'instance': NotifySendPulse,
-        'requests_response_text': SENDPULSE_GOOD_RESPONSE,
+         'requests_response_text': SENDPULSE_GOOD_RESPONSE,
 
          # Our expected url(privacy=True) startswith() response:
          'privacy_url': 'sendpulse://user@example.com/c...d/c...6/',
@@ -145,11 +254,109 @@ def test_plugin_sendpulse_urls():
     AppriseURLTester(tests=apprise_url_tests).run_all()
 
 
-@mock.patch('requests.get')
 @mock.patch('requests.post')
-def test_plugin_sendpulse_edge_cases(mock_post, mock_get):
+def test_plugin_sendpulse_edge_cases(mock_post):
     """
     NotifySendPulse() Edge Cases
+    """
+    request = mock.Mock()
+    request.status_code = requests.codes.ok
+    request.content = SENDPULSE_GOOD_RESPONSE
+
+    # Prepare Mock
+    mock_post.return_value = request
+
+    obj = Apprise.instantiate(
+        'sendpulse://user@example.com/ci/cs/Test<test@example.com>')
+
+    assert obj.notify(
+        body='body', title='title', notify_type=NotifyType.INFO) is True
+
+    # Test our call count
+    assert mock_post.call_count == 2
+
+    # Authentication
+    assert mock_post.call_args_list[0][0][0] == \
+        'https://api.sendpulse.com/oauth/access_token'
+
+    payload = loads(mock_post.call_args_list[0][1]['data'])
+    assert payload == {
+        'grant_type': 'client_credentials',
+        'client_id': 'ci',
+        'client_secret': 'cs',
+    }
+
+    assert mock_post.call_args_list[1][0][0] == \
+        'https://api.sendpulse.com/smtp/emails'
+    payload = loads(mock_post.call_args_list[1][1]['data'])
+
+    assert payload == {
+        'email': {
+            'from': {
+                'email': 'user@example.com', 'name': 'Apprise'
+            },
+            'to': [{'email': 'test@example.com', 'name': 'Test'}],
+            'subject': 'title', 'text': 'body', 'html': 'Ym9keQ=='}}
+
+    mock_post.reset_mock()
+
+    obj = Apprise.instantiate('sendpulse://user@example.com/ci/cs/?from=John')
+
+    assert obj.notify(
+        body='body', title='title', notify_type=NotifyType.INFO) is True
+
+    # Test our call count
+    assert mock_post.call_count == 2
+
+    # Authentication
+    assert mock_post.call_args_list[0][0][0] == \
+        'https://api.sendpulse.com/oauth/access_token'
+
+    payload = loads(mock_post.call_args_list[0][1]['data'])
+    assert payload == {
+        'grant_type': 'client_credentials',
+        'client_id': 'ci',
+        'client_secret': 'cs',
+    }
+
+    assert mock_post.call_args_list[1][0][0] == \
+        'https://api.sendpulse.com/smtp/emails'
+    payload = loads(mock_post.call_args_list[1][1]['data'])
+
+    assert payload == {
+        'email': {
+            'from': {
+                'email': 'user@example.com', 'name': 'John'
+            },
+            'to': [{'email': 'user@example.com', 'name': 'John'}],
+            'subject': 'title', 'text': 'body', 'html': 'Ym9keQ=='}}
+
+    mock_post.reset_mock()
+
+    # Second call no longer needs to authenticate
+    assert obj.notify(
+        body='body', title='title', notify_type=NotifyType.INFO) is True
+
+    assert mock_post.call_count == 1
+
+    assert mock_post.call_args_list[0][0][0] == \
+        'https://api.sendpulse.com/smtp/emails'
+
+    # force an exception
+    mock_post.side_effect = requests.RequestException
+    assert obj.notify(
+        body='body', title='title', notify_type=NotifyType.INFO) is False
+
+    # Set an invalid return code
+    mock_post.side_effect = None
+    request.status_code = 403
+    assert obj.notify(
+        body='body', title='title', notify_type=NotifyType.INFO) is False
+
+
+def test_plugin_sendpulse_fail_cases():
+    """
+    NotifySendPulse() Fail Cases
 
     """
 
@@ -157,39 +364,38 @@ def test_plugin_sendpulse_edge_cases(mock_post, mock_get):
     with pytest.raises(TypeError):
         NotifySendPulse(
             client_id='abcd', client_secret=None,
-            from_email='user@example.com')
+            from_addr='user@example.com')
 
     with pytest.raises(TypeError):
         NotifySendPulse(
             client_id=None, client_secret='abcd123',
-            from_email='user@example.com')
+            from_addr='user@example.com')
 
     # invalid from email
     with pytest.raises(TypeError):
         NotifySendPulse(
-            client_id='abcd', client_secret='abcd456', from_email='!invalid')
+            client_id='abcd', client_secret='abcd456', from_addr='!invalid')
 
     # no email
     with pytest.raises(TypeError):
         NotifySendPulse(
-            client_id='abcd', client_secret='abcd789', from_email=None)
+            client_id='abcd', client_secret='abcd789', from_addr=None)
 
     # Invalid To email address
     NotifySendPulse(
         client_id='abcd', client_secret='abcd321',
-        from_email='user@example.com', targets="!invalid")
+        from_addr='user@example.com', targets="!invalid")
 
     # Test invalid bcc/cc entries mixed with good ones
     assert isinstance(NotifySendPulse(
         client_id='abcd', client_secret='abcd654',
-        from_email='l2g@example.com',
+        from_addr='l2g@example.com',
         bcc=('abc@def.com', '!invalid'),
         cc=('abc@test.org', '!invalid')), NotifySendPulse)
 
 
-@mock.patch('requests.get')
 @mock.patch('requests.post')
-def test_plugin_sendpulse_attachments(mock_post, mock_get):
+def test_plugin_sendpulse_attachments(mock_post):
     """
     NotifySendPulse() Attachments
 
@@ -201,7 +407,6 @@ def test_plugin_sendpulse_attachments(mock_post, mock_get):
 
     # Prepare Mock
     mock_post.return_value = request
-    mock_get.return_value = request
 
     path = os.path.join(TEST_VAR_DIR, 'apprise-test.gif')
     attach = AppriseAttachment(path)
@@ -212,7 +417,6 @@ def test_plugin_sendpulse_attachments(mock_post, mock_get):
         attach=attach) is True
 
     mock_post.reset_mock()
-    mock_get.reset_mock()
 
     # Try again in a use case where we can't access the file
     with mock.patch("os.path.isfile", return_value=False):

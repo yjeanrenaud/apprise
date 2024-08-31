@@ -29,15 +29,15 @@
 # Simple API Reference:
 #  - https://sendpulse.com/integrations/api/smtp
 
+import re
 import requests
-from json import dumps, loads
 import base64
+from json import dumps, loads
 
 from .base import NotifyBase
 from .. import exception
 from ..common import NotifyFormat
 from ..common import NotifyType
-from ..utils import parse_list
 from ..utils import is_email
 from ..utils import parse_emails
 from ..conversion import convert_between
@@ -87,14 +87,18 @@ class NotifySendPulse(NotifyBase):
 
     # Define object templates
     templates = (
-        '{schema}://{from_email}/{client_id}/{client_secret}/',
-        '{schema}://{from_email}/{client_id}/{client_secret}/{targets}',
+        '{schema}://{user}@{host}/{client_secret}/',
+        '{schema}://{user}@{host}/{client_id}/{client_secret}/{targets}',
     )
 
     # Define our template arguments
     template_tokens = dict(NotifyBase.template_tokens, **{
-        'from_email': {
-            'name': _('Source Email'),
+        'user': {
+            'name': _('User Name'),
+            'type': 'string',
+        },
+        'host': {
+            'name': _('Domain'),
             'type': 'string',
             'required': True,
         },
@@ -131,7 +135,7 @@ class NotifySendPulse(NotifyBase):
         'from': {
             'name': _('From Email'),
             'type': 'string',
-            'map_to': 'from_email',
+            'map_to': 'from_addr',
         },
         'cc': {
             'name': _('Carbon Copy'),
@@ -162,9 +166,9 @@ class NotifySendPulse(NotifyBase):
         },
     }
 
-    def __init__(self, from_email, client_id, client_secret, targets=None,
-                 cc=None, bcc=None, template=None,
-                 template_data=None, **kwargs):
+    def __init__(self, client_id, client_secret, from_addr=None, targets=None,
+                 cc=None, bcc=None, template=None, template_data=None,
+                 **kwargs):
         """
         Initialize Notify SendPulse Object
         """
@@ -173,11 +177,51 @@ class NotifySendPulse(NotifyBase):
         # Api Key is acquired upon a sucessful login
         self.access_token = None
 
-        result = is_email(from_email)
+        # For tracking our email -> name lookups
+        self.names = {}
+
+        # Temporary from_addr to work with for parsing
+        _from_addr = [self.app_id, '']
+
+        if self.user:
+            if self.host:
+                # Prepare the bases of our email
+                _from_addr = [_from_addr[0], '{}@{}'.format(
+                    re.split(r'[\s@]+', self.user)[0],
+                    self.host,
+                )]
+
+            else:
+                result = is_email(self.user)
+                if result:
+                    # Prepare the bases of our email and include domain
+                    self.host = result['domain']
+                    _from_addr = [
+                        result['name'] if result['name']
+                        else _from_addr[0], self.user]
+
+        if isinstance(from_addr, str):
+            result = is_email(from_addr)
+            if result:
+                _from_addr = (
+                    result['name'] if result['name'] else _from_addr[0],
+                    result['full_email'])
+            else:
+                # Only update the string but use the already detected info
+                _from_addr[0] = from_addr
+
+        result = is_email(_from_addr[1])
         if not result:
-            msg = 'Invalid ~From~ email specified: {}'.format(from_email)
+            # Parse Source domain based on from_addr
+            msg = 'Invalid ~From~ email specified: {}'.format(
+                '{} <{}>'.format(_from_addr[0], _from_addr[1])
+                if _from_addr[0] else '{}'.format(_from_addr[1]))
             self.logger.warning(msg)
             raise TypeError(msg)
+
+        # Store our lookup
+        self.from_addr = _from_addr[1]
+        self.names[_from_addr[1]] = _from_addr[0]
 
         # Client ID
         self.client_id = validate_regex(
@@ -196,14 +240,6 @@ class NotifySendPulse(NotifyBase):
                   '({}) was specified.'.format(client_secret)
             self.logger.warning(msg)
             raise TypeError(msg)
-
-        # Tracks emails to name lookups (if they exist)
-        self.__email_map = {}
-
-        # Store from email address
-        self.from_email = result['full_email']
-        self.__email_map[self.from_email] = result['name'] \
-            if result['name'] else self.app_id
 
         # Acquire Targets (To Emails)
         self.targets = list()
@@ -239,7 +275,7 @@ class NotifySendPulse(NotifyBase):
                 if result:
                     self.targets.append(result['full_email'])
                     if result['name']:
-                        self.__email_map[result['full_email']] = result['name']
+                        self.names[result['full_email']] = result['name']
                     continue
 
                 self.logger.warning(
@@ -249,16 +285,16 @@ class NotifySendPulse(NotifyBase):
 
         else:
             # If our target email list is empty we want to add ourselves to it
-            self.targets.append(self.from_email)
+            self.targets.append(self.from_addr)
 
         # Validate recipients (cc:) and drop bad ones:
-        for recipient in parse_list(cc):
+        for recipient in parse_emails(cc):
 
             result = is_email(recipient)
             if result:
                 self.cc.add(result['full_email'])
                 if result['name']:
-                    self.__email_map[result['full_email']] = result['name']
+                    self.names[result['full_email']] = result['name']
                 continue
 
             self.logger.warning(
@@ -267,13 +303,13 @@ class NotifySendPulse(NotifyBase):
             )
 
         # Validate recipients (bcc:) and drop bad ones:
-        for recipient in parse_list(bcc):
+        for recipient in parse_emails(bcc):
 
             result = is_email(recipient)
             if result:
                 self.bcc.add(result['full_email'])
                 if result['name']:
-                    self.__email_map[result['full_email']] = result['name']
+                    self.names[result['full_email']] = result['name']
                 continue
 
             self.logger.warning(
@@ -283,7 +319,7 @@ class NotifySendPulse(NotifyBase):
 
         if len(self.targets) == 0:
             # Notify ourselves
-            self.targets.append(self.from_email)
+            self.targets.append(self.from_addr)
 
         return
 
@@ -308,8 +344,8 @@ class NotifySendPulse(NotifyBase):
             # Handle our Carbon Copy Addresses
             params['cc'] = ','.join([
                 formataddr(
-                    (self.__email_map[e]
-                     if e in self.__email_map else False, e),
+                    (self.names[e]
+                     if e in self.names else False, e),
                     # Swap comma for it's escaped url code (if detected) since
                     # we're using that as a delimiter
                     charset='utf-8').replace(',', '%2C')
@@ -319,8 +355,8 @@ class NotifySendPulse(NotifyBase):
             # Handle our Blind Carbon Copy Addresses
             params['bcc'] = ','.join([
                 formataddr(
-                    (self.__email_map[e]
-                     if e in self.__email_map else False, e),
+                    (self.names[e]
+                     if e in self.names else False, e),
                     # Swap comma for it's escaped url code (if detected) since
                     # we're using that as a delimiter
                     charset='utf-8').replace(',', '%2C')
@@ -330,6 +366,10 @@ class NotifySendPulse(NotifyBase):
             # Handle our Template ID if if was specified
             params['template'] = self.template
 
+        # handle from=
+        if self.names[self.from_addr] != self.app_id:
+            params['from'] = self.names[self.from_addr]
+
         # Append our template_data into our parameter list
         params.update(
             {'+{}'.format(k): v for k, v in self.template_data.items()})
@@ -337,11 +377,11 @@ class NotifySendPulse(NotifyBase):
         # a simple boolean check as to whether we display our target emails
         # or not
         has_targets = \
-            not (len(self.targets) == 1 and self.targets[0] == self.from_email)
+            not (len(self.targets) == 1 and self.targets[0] == self.from_addr)
 
         return '{schema}://{source}/{cid}/{secret}/{targets}?{params}'.format(
             schema=self.secure_protocol,
-            source=self.from_email,
+            source=self.from_addr,
             cid=self.pprint(self.client_id, privacy, safe=''),
             secret=self.pprint(self.client_secret, privacy, safe=''),
             targets='' if not has_targets else '/'.join(
@@ -388,8 +428,8 @@ class NotifySendPulse(NotifyBase):
         _payload = {
             'email': {
                 'from': {
-                    'name': self.from_email[0],
-                    'email': self.from_email[1],
+                    'name': self.names[self.from_addr],
+                    'email': self.from_addr,
                 },
                 # To is populated further on
                 'to': [],
@@ -473,8 +513,8 @@ class NotifySendPulse(NotifyBase):
             to = {
                 'email': target
             }
-            if target in self.__email_map:
-                to['name'] = self.__email_map[target]
+            if target in self.names:
+                to['name'] = self.names[target]
 
             # Set our target
             payload['email']['to'] = [to]
@@ -485,8 +525,8 @@ class NotifySendPulse(NotifyBase):
                     item = {
                         'email': email,
                     }
-                if email in self.__email_map:
-                    item['name'] = self.__email_map[email]
+                if email in self.names:
+                    item['name'] = self.names[email]
 
                 payload['email']['cc'].append(item)
 
@@ -496,8 +536,8 @@ class NotifySendPulse(NotifyBase):
                     item = {
                         'email': email,
                     }
-                if email in self.__email_map:
-                    item['name'] = self.__email_map[email]
+                if email in self.names:
+                    item['name'] = self.names[email]
 
                 payload['email']['bcc'].append(item)
 
@@ -528,7 +568,7 @@ class NotifySendPulse(NotifyBase):
             headers.update(extended_headers)
 
         self.logger.debug('SendPulse POST URL: %s (cert_verify=%r)' % (
-            self.url, self.verify_certificate,
+            url, self.verify_certificate,
         ))
         self.logger.debug('SendPulse Payload: %s' % str(payload))
 
@@ -539,7 +579,7 @@ class NotifySendPulse(NotifyBase):
         self.throttle()
         try:
             r = requests.post(
-                self.url,
+                url,
                 data=dumps(payload),
                 headers=headers,
                 verify=self.verify_certificate,
@@ -610,19 +650,22 @@ class NotifySendPulse(NotifyBase):
 
         """
 
-        results = NotifyBase.parse_url(url)
+        results = NotifyBase.parse_url(url, verify_host=False)
         if not results:
             # We're done early as we couldn't load the results
             return results
 
         # Define our minimum requirements; defining them now saves us from
         # having to if/else all kinds of branches below...
-        results['from_email'] = None
+        results['from_addr'] = None
         results['client_id'] = None
         results['client_secret'] = None
 
+        # Prepare our targets
+        results['targets'] = []
+
         # Our URL looks like this:
-        #    {schema}://{from_email}:{client_id}/{client_secret}/{targets}
+        #    {schema}://{from_addr}:{client_id}/{client_secret}/{targets}
         #
         # which actually equates to:
         #    {schema}://{user}@{host}/{client_id}/{client_secret}
@@ -630,10 +673,27 @@ class NotifySendPulse(NotifyBase):
         #                 ^       ^
         #                 |       |
         #                -from addr-
+        if 'from' in results['qsd']:
+            results['from_addr'] = \
+                NotifySendPulse.unquote(results['qsd']['from'].rstrip())
+
+            if is_email(results['from_addr']):
+                # Our hostname is free'd up to be interpreted as part of the
+                # targets
+                results['targets'].append(
+                    NotifySendPulse.unquote(results['host']))
+                results['host'] = ''
+
+        if 'user' in results['qsd'] and \
+                is_email(NotifySendPulse.unquote(results['user'])):
+            # Our hostname is free'd up to be interpreted as part of the
+            # targets
+            results['targets'].append(NotifySendPulse.unquote(results['host']))
+            results['host'] = ''
 
         # Get our potential email targets
         # First 2 elements are the client_id and client_secret
-        results['targets'] = NotifySendPulse.split_path(results['fullpath'])
+        results['targets'] += NotifySendPulse.split_path(results['fullpath'])
         # check for our client id
         if 'id' in results['qsd'] and len(results['qsd']['id']):
             # Store our Client ID
@@ -653,41 +713,20 @@ class NotifySendPulse(NotifyBase):
             # Store our Client Secret
             results['client_secret'] = results['targets'].pop(0)
 
-        if 'from' in results['qsd'] and len(results['qsd']['from']):
-            results['from_email'] = \
-                NotifySendPulse.unquote(results['qsd']['from_email'])
-
-            # This means any user@host is the To Address if defined
-            if results.get('user') and results.get('host'):
-                results['targets'] += '{}@{}'.format(
-                    NotifySendPulse.unquote(
-                        results['password']
-                        if results['password'] else results['user']),
-                    NotifySendPulse.unquote(results['host']),
-                )
-
-        elif results.get('user') and results.get('host'):
-            results['from_email'] = '{}@{}'.format(
-                NotifySendPulse.unquote(
-                    results['password']
-                    if results['password'] else results['user']),
-                NotifySendPulse.unquote(results['host']),
-            )
-
         # The 'to' makes it easier to use yaml configuration
         if 'to' in results['qsd'] and len(results['qsd']['to']):
             results['targets'] += \
-                NotifySendPulse.parse_list(results['qsd']['to'])
+                NotifySendPulse.unquote(results['qsd']['to'])
 
         # Handle Carbon Copy Addresses
         if 'cc' in results['qsd'] and len(results['qsd']['cc']):
             results['cc'] = \
-                NotifySendPulse.parse_list(results['qsd']['cc'])
+                NotifySendPulse.unquote(results['qsd']['cc'])
 
         # Handle Blind Carbon Copy Addresses
         if 'bcc' in results['qsd'] and len(results['qsd']['bcc']):
             results['bcc'] = \
-                NotifySendPulse.parse_list(results['qsd']['bcc'])
+                NotifySendPulse.unquote(results['qsd']['bcc'])
 
         # Handle Blind Carbon Copy Addresses
         if 'template' in results['qsd'] and len(results['qsd']['template']):
