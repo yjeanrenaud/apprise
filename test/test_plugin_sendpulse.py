@@ -26,6 +26,7 @@
 # ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 # POSSIBILITY OF SUCH DAMAGE.
 
+from json import dumps
 from unittest import mock
 
 import os
@@ -42,6 +43,12 @@ from helpers import AppriseURLTester
 import logging
 logging.disable(logging.CRITICAL)
 
+SENDPULSE_GOOD_RESPONSE = dumps({
+    "access_token": 'abc123'
+})
+
+SENDPULSE_BAD_RESPONSE = '{'
+
 # Attachment Directory
 TEST_VAR_DIR = os.path.join(os.path.dirname(__file__), 'var')
 
@@ -54,61 +61,76 @@ apprise_url_tests = (
         'instance': None,
     }),
     ('sendpulse://abcd', {
-        # Just an broken email (no email, client_id or secret)
-        'instance': None,
+        # invalid from email
+        'instance': TypeError,
     }),
-    ('sendpulse://abcd@host', {
+    ('sendpulse://abcd@host.com', {
         # Just an Email specified, no client_id or client_secret
-        'instance': None,
+        'instance': TypeError,
     }),
-    ('sendpulse://user@example.com/client_id/client_secret/', {
+    ('sendpulse://user@example.com/client_id/cs1/', {
         'instance': NotifySendPulse,
+        'requests_response_text': SENDPULSE_GOOD_RESPONSE,
     }),
-    ('sendpulse://user@example.com/client_id/client_secret/'
+    ('sendpulse://user@example.com/client_id/cs1a/', {
+        'instance': NotifySendPulse,
+        'requests_response_text': SENDPULSE_BAD_RESPONSE,
+        # Notify will fail because auth failed
+        'response': False,
+    }),
+    ('sendpulse://user@example.com/client_id/cs2/'
      '?bcc=l2g@nuxref.com', {
          # A good email with Blind Carbon Copy
          'instance': NotifySendPulse,
+        'requests_response_text': SENDPULSE_GOOD_RESPONSE,
      }),
-    ('sendpulse://user@example.com/client_id/client_secret/'
+    ('sendpulse://user@example.com/client_id/cs3/'
      '?cc=l2g@nuxref.com', {
          # A good email with Carbon Copy
          'instance': NotifySendPulse,
+        'requests_response_text': SENDPULSE_GOOD_RESPONSE,
      }),
-    ('sendpulse://user@example.com/client_id/client_secret/'
+    ('sendpulse://user@example.com/client_id/cs4/'
      '?to=l2g@nuxref.com', {
          # A good email with Carbon Copy
          'instance': NotifySendPulse,
+        'requests_response_text': SENDPULSE_GOOD_RESPONSE,
      }),
-    ('sendpulse://user@example.com/client_id/client_secret/'
+    ('sendpulse://user@example.com/client_id/cs5/'
      '?template=1234', {
          # A good email with a template + no substitutions
          'instance': NotifySendPulse,
+        'requests_response_text': SENDPULSE_GOOD_RESPONSE,
      }),
-    ('sendpulse://user@example.com/client_id/client_secret/'
+    ('sendpulse://user@example.com/client_id/cs6/'
      '?template=1234&+sub=value&+sub2=value2', {
          # A good email with a template + substitutions
          'instance': NotifySendPulse,
+        'requests_response_text': SENDPULSE_GOOD_RESPONSE,
 
          # Our expected url(privacy=True) startswith() response:
-         'privacy_url': 'sendpulse://a...d:user@example.com/',
+         'privacy_url': 'sendpulse://user@example.com/c...d/c...6/',
      }),
-    ('sendpulse://user@example.com/client_id/client_secret/', {
+    ('sendpulse://user@example.com/client_id/cs7/', {
         'instance': NotifySendPulse,
         # force a failure
         'response': False,
         'requests_response_code': requests.codes.internal_server_error,
+        'requests_response_text': SENDPULSE_GOOD_RESPONSE,
     }),
-    ('sendpulse://user@example.com/client_id/client_secret/', {
+    ('sendpulse://user@example.com/client_id/cs8/', {
         'instance': NotifySendPulse,
         # throw a bizzare code forcing us to fail to look it up
         'response': False,
         'requests_response_code': 999,
+        'requests_response_text': SENDPULSE_GOOD_RESPONSE,
     }),
-    ('sendpulse://user@example.com/client_id/client_secret/', {
+    ('sendpulse://user@example.com/client_id/cs9/', {
         'instance': NotifySendPulse,
         # Throws a series of connection and transfer exceptions when this flag
         # is set and tests that we gracfully handle them
         'test_requests_exceptions': True,
+        'requests_response_text': SENDPULSE_GOOD_RESPONSE,
     }),
 )
 
@@ -139,27 +161,27 @@ def test_plugin_sendpulse_edge_cases(mock_post, mock_get):
 
     with pytest.raises(TypeError):
         NotifySendPulse(
-            client_id=None, client_secret='abcd',
+            client_id=None, client_secret='abcd123',
             from_email='user@example.com')
 
     # invalid from email
     with pytest.raises(TypeError):
         NotifySendPulse(
-            client_id='abcd', client_secret='abcd', from_email='!invalid')
+            client_id='abcd', client_secret='abcd456', from_email='!invalid')
 
     # no email
     with pytest.raises(TypeError):
         NotifySendPulse(
-            client_id='abcd', client_secret='abcd', from_email=None)
+            client_id='abcd', client_secret='abcd789', from_email=None)
 
     # Invalid To email address
     NotifySendPulse(
-        client_id='abcd', client_secret='abcd',
+        client_id='abcd', client_secret='abcd321',
         from_email='user@example.com', targets="!invalid")
 
     # Test invalid bcc/cc entries mixed with good ones
     assert isinstance(NotifySendPulse(
-        client_id='abcd', client_secret='abcd',
+        client_id='abcd', client_secret='abcd654',
         from_email='l2g@example.com',
         bcc=('abc@def.com', '!invalid'),
         cc=('abc@test.org', '!invalid')), NotifySendPulse)
@@ -175,6 +197,7 @@ def test_plugin_sendpulse_attachments(mock_post, mock_get):
 
     request = mock.Mock()
     request.status_code = requests.codes.ok
+    request.content = SENDPULSE_GOOD_RESPONSE
 
     # Prepare Mock
     mock_post.return_value = request
@@ -182,7 +205,7 @@ def test_plugin_sendpulse_attachments(mock_post, mock_get):
 
     path = os.path.join(TEST_VAR_DIR, 'apprise-test.gif')
     attach = AppriseAttachment(path)
-    obj = Apprise.instantiate('sendpulse://user@example.com/abcd/abcd')
+    obj = Apprise.instantiate('sendpulse://user@example.com/aaaa/bbbb')
     assert isinstance(obj, NotifySendPulse)
     assert obj.notify(
         body='body', title='title', notify_type=NotifyType.INFO,

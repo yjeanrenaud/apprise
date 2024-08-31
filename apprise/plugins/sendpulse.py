@@ -30,7 +30,7 @@
 #  - https://sendpulse.com/integrations/api/smtp
 
 import requests
-from json import dumps
+from json import dumps, loads
 import base64
 
 from .base import NotifyBase
@@ -68,6 +68,9 @@ class NotifySendPulse(NotifyBase):
 
     # The default Email API URL to use
     notify_email_url = 'https://api.sendpulse.com/smtp/emails'
+
+    # Our OAuth Query
+    notify_oauth_url = 'https://api.sendpulse.com/oauth/access_token'
 
     # Support attachments
     attachment_support = True
@@ -167,6 +170,15 @@ class NotifySendPulse(NotifyBase):
         """
         super().__init__(**kwargs)
 
+        # Api Key is acquired upon a sucessful login
+        self.access_token = None
+
+        result = is_email(from_email)
+        if not result:
+            msg = 'Invalid ~From~ email specified: {}'.format(from_email)
+            self.logger.warning(msg)
+            raise TypeError(msg)
+
         # Client ID
         self.client_id = validate_regex(
             client_id, *self.template_tokens['client_id']['regex'])
@@ -182,12 +194,6 @@ class NotifySendPulse(NotifyBase):
         if not self.client_secret:
             msg = 'An invalid SendPulse Client Secret ' \
                   '({}) was specified.'.format(client_secret)
-            self.logger.warning(msg)
-            raise TypeError(msg)
-
-        result = is_email(from_email)
-        if not result:
-            msg = 'Invalid ~From~ email specified: {}'.format(from_email)
             self.logger.warning(msg)
             raise TypeError(msg)
 
@@ -208,6 +214,8 @@ class NotifySendPulse(NotifyBase):
         # Acquire Blind Carbon Copies
         self.bcc = set()
 
+        # No template
+        self.template = None
         if template:
             try:
                 # Store our template
@@ -229,9 +237,9 @@ class NotifySendPulse(NotifyBase):
             for recipient in parse_emails(targets):
                 result = is_email(recipient)
                 if result:
-                    self.targets.append(
-                        (result['name'] if result['name'] else False,
-                            result['full_email']))
+                    self.targets.append(result['full_email'])
+                    if result['name']:
+                        self.__email_map[result['full_email']] = result['name']
                     continue
 
                 self.logger.warning(
@@ -250,7 +258,7 @@ class NotifySendPulse(NotifyBase):
             if result:
                 self.cc.add(result['full_email'])
                 if result['name']:
-                    self.__email_lookup[result['full_email']] = result['name']
+                    self.__email_map[result['full_email']] = result['name']
                 continue
 
             self.logger.warning(
@@ -265,7 +273,7 @@ class NotifySendPulse(NotifyBase):
             if result:
                 self.bcc.add(result['full_email'])
                 if result['name']:
-                    self.__email_lookup[result['full_email']] = result['name']
+                    self.__email_map[result['full_email']] = result['name']
                 continue
 
             self.logger.warning(
@@ -300,8 +308,8 @@ class NotifySendPulse(NotifyBase):
             # Handle our Carbon Copy Addresses
             params['cc'] = ','.join([
                 formataddr(
-                    (self.__email_lookup[e]
-                     if e in self.__email_lookup else False, e),
+                    (self.__email_map[e]
+                     if e in self.__email_map else False, e),
                     # Swap comma for it's escaped url code (if detected) since
                     # we're using that as a delimiter
                     charset='utf-8').replace(',', '%2C')
@@ -311,8 +319,8 @@ class NotifySendPulse(NotifyBase):
             # Handle our Blind Carbon Copy Addresses
             params['bcc'] = ','.join([
                 formataddr(
-                    (self.__email_lookup[e]
-                     if e in self.__email_lookup else False, e),
+                    (self.__email_map[e]
+                     if e in self.__email_map else False, e),
                     # Swap comma for it's escaped url code (if detected) since
                     # we're using that as a delimiter
                     charset='utf-8').replace(',', '%2C')
@@ -353,10 +361,24 @@ class NotifySendPulse(NotifyBase):
         Perform SendPulse Notification
         """
 
-        headers = {
-            'User-Agent': self.app_id,
-            'Content-Type': 'application/json',
-            'Authorization': 'Bearer {}'.format(self.apikey),
+        if not self.access_token:
+            # Attempt to acquire acquire a login
+            _payload = {
+                'grant_type': 'client_credentials',
+                'client_id': self.client_id,
+                'client_secret': self.client_secret,
+            }
+
+            success, response = self._fetch(self.notify_oauth_url, _payload)
+            if not success:
+                return False
+
+            # If we get here, we're authenticated
+            self.access_token = response.get('access_token')
+
+        # Store our bearer
+        extended_headers = {
+            'Authorization': 'Bearer {}'.format(self.access_token),
         }
 
         # error tracking (used for function return)
@@ -451,8 +473,8 @@ class NotifySendPulse(NotifyBase):
             to = {
                 'email': target
             }
-            if target in self.__email_lookup:
-                to['name'] = self.__email_lookup[target]
+            if target in self.__email_map:
+                to['name'] = self.__email_map[target]
 
             # Set our target
             payload['email']['to'] = [to]
@@ -463,8 +485,8 @@ class NotifySendPulse(NotifyBase):
                     item = {
                         'email': email,
                     }
-                if email in self.__email_lookup:
-                    item['name'] = self.__email_lookup[email]
+                if email in self.__email_map:
+                    item['name'] = self.__email_map[email]
 
                 payload['email']['cc'].append(item)
 
@@ -474,33 +496,77 @@ class NotifySendPulse(NotifyBase):
                     item = {
                         'email': email,
                     }
-                if email in self.__email_lookup:
-                    item['name'] = self.__email_lookup[email]
+                if email in self.__email_map:
+                    item['name'] = self.__email_map[email]
 
                 payload['email']['bcc'].append(item)
 
-            self.logger.debug('SendPulse POST URL: %s (cert_verify=%r)' % (
-                self.notify_email_url, self.verify_certificate,
-            ))
-            self.logger.debug('SendPulse Payload: %s' % str(payload))
+            # Perform our post
+            success, response = self._fetch(
+                self.notify_email_url, payload, target, extended_headers)
+            if not success:
+                has_error = True
+                continue
 
-            # Always call throttle before any remote server i/o is made
-            self.throttle()
+        return not has_error
+
+    def _fetch(self, url, payload, target=None, extended_headers={}):
+        """
+        Wrapper to request.post() to manage it's response better and make
+        the send() function cleaner and easier to maintain.
+
+        This function returns True if the _post was successful and False
+        if it wasn't.
+        """
+
+        headers = {
+            'User-Agent': self.app_id,
+            'Content-Type': 'application/json',
+        }
+
+        if extended_headers:
+            headers.update(extended_headers)
+
+        self.logger.debug('SendPulse POST URL: %s (cert_verify=%r)' % (
+            self.url, self.verify_certificate,
+        ))
+        self.logger.debug('SendPulse Payload: %s' % str(payload))
+
+        # Prepare our default response
+        response = {}
+
+        # Always call throttle before any remote server i/o is made
+        self.throttle()
+        try:
+            r = requests.post(
+                self.url,
+                data=dumps(payload),
+                headers=headers,
+                verify=self.verify_certificate,
+                timeout=self.request_timeout,
+            )
+
             try:
-                r = requests.post(
-                    self.notify_email_url,
-                    data=dumps(payload),
-                    headers=headers,
-                    verify=self.verify_certificate,
-                    timeout=self.request_timeout,
-                )
-                if r.status_code not in (
-                        requests.codes.ok, requests.codes.accepted):
-                    # We had a problem
-                    status_str = \
-                        NotifySendPulse.http_response_code_lookup(
-                            r.status_code)
+                response = loads(r.content)
 
+            except (AttributeError, TypeError, ValueError):
+                # This gets thrown if we can't parse our JSON Response
+                #  - ValueError = r.content is Unparsable
+                #  - TypeError = r.content is None
+                #  - AttributeError = r is None
+                self.logger.warning('Invalid response from SendPulse server.')
+                self.logger.debug(
+                    'Response Details:\r\n{}'.format(r.content))
+                return (False, {})
+
+            if r.status_code not in (
+                    requests.codes.ok, requests.codes.accepted):
+                # We had a problem
+                status_str = \
+                    NotifySendPulse.http_response_code_lookup(
+                        r.status_code)
+
+                if target:
                     self.logger.warning(
                         'Failed to send SendPulse notification to {}: '
                         '{}{}error={}.'.format(
@@ -508,29 +574,33 @@ class NotifySendPulse(NotifyBase):
                             status_str,
                             ', ' if status_str else '',
                             r.status_code))
-
-                    self.logger.debug(
-                        'Response Details:\r\n{}'.format(r.content))
-
-                    # Mark our failure
-                    has_error = True
-                    continue
-
                 else:
+                    self.logger.warning(
+                        'SendPulse Authentication Request failed: '
+                        '{}{}error={}.'.format(
+                            status_str,
+                            ', ' if status_str else '',
+                            r.status_code))
+
+                self.logger.debug(
+                    'Response Details:\r\n{}'.format(r.content))
+
+            else:
+                if target:
                     self.logger.info(
                         'Sent SendPulse notification to {}.'.format(target))
+                else:
+                    self.logger.debug('SendPulse authentication successful')
 
-            except requests.RequestException as e:
-                self.logger.warning(
-                    'A Connection error occurred sending SendPulse '
-                    'notification to {}.'.format(target))
-                self.logger.debug('Socket Exception: %s' % str(e))
+                return (True, response)
 
-                # Mark our failure
-                has_error = True
-                continue
+        except requests.RequestException as e:
+            self.logger.warning(
+                'A Connection error occurred sending SendPulse '
+                'notification to {}.'.format(target))
+            self.logger.debug('Socket Exception: %s' % str(e))
 
-        return not has_error
+        return (False, response)
 
     @staticmethod
     def parse_url(url):
@@ -544,6 +614,12 @@ class NotifySendPulse(NotifyBase):
         if not results:
             # We're done early as we couldn't load the results
             return results
+
+        # Define our minimum requirements; defining them now saves us from
+        # having to if/else all kinds of branches below...
+        results['from_email'] = None
+        results['client_id'] = None
+        results['client_secret'] = None
 
         # Our URL looks like this:
         #    {schema}://{from_email}:{client_id}/{client_secret}/{targets}
@@ -564,7 +640,7 @@ class NotifySendPulse(NotifyBase):
             results['client_id'] = \
                 NotifySendPulse.unquote(results['qsd']['id'])
 
-        else:
+        elif results['targets']:
             # Store our Client ID
             results['client_id'] = results['targets'].pop(0)
 
@@ -573,7 +649,7 @@ class NotifySendPulse(NotifyBase):
             results['client_secret'] = \
                 NotifySendPulse.unquote(results['qsd']['secret'])
 
-        else:
+        elif results['targets']:
             # Store our Client Secret
             results['client_secret'] = results['targets'].pop(0)
 
