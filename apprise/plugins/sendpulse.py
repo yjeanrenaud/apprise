@@ -38,6 +38,7 @@ from .base import NotifyBase
 from .. import exception
 from ..common import NotifyFormat
 from ..common import NotifyType
+from ..common import PersistentStoreMode
 from ..utils import is_email
 from ..utils import parse_emails
 from ..conversion import convert_between
@@ -78,6 +79,18 @@ class NotifySendPulse(NotifyBase):
     # Allow 300 requests per minute.
     # 60/300 = 0.2
     request_rate_per_sec = 0.2
+
+    # Our default is to no not use persistent storage beyond in-memory
+    # reference
+    storage_mode = PersistentStoreMode.AUTO
+
+    # Token expiry if not detected in seconds (below is 1 hr)
+    token_expiry = 3600
+
+    # The number of seconds to grace for early token renewal
+    # Below states that 10 seconds bfore our token expiry, we'll
+    # attempt to renew it
+    token_expiry_edge = 10
 
     # Support attachments
     attachment_support = True
@@ -173,9 +186,6 @@ class NotifySendPulse(NotifyBase):
         Initialize Notify SendPulse Object
         """
         super().__init__(**kwargs)
-
-        # Api Key is acquired upon a sucessful login
-        self.access_token = None
 
         # For tracking our email -> name lookups
         self.names = {}
@@ -395,31 +405,58 @@ class NotifySendPulse(NotifyBase):
         """
         return len(self.targets)
 
+    def login(self):
+        """
+        Authenticates with the server to get a access_token
+        """
+        self.store.clear('access_token')
+        payload = {
+            'grant_type': 'client_credentials',
+            'client_id': self.client_id,
+            'client_secret': self.client_secret,
+        }
+
+        success, response = self._fetch(self.notify_oauth_url, payload)
+        if not success:
+            return False
+
+        access_token = response.get('access_token')
+
+        # If we get here, we're authenticated
+        try:
+            expires = \
+                int(response.get('expires_in')) - self.token_expiry_edge
+            if expires <= self.token_expiry_edge:
+                self.logger.error(
+                    'SendPulse token expiry limit returned was invalid')
+                return False
+
+            elif expires > self.token_expiry:
+                self.logger.warning(
+                    'SendPulse token expiry limit fixed to: {}s'
+                    .format(self.token_expiry))
+                expires = self.token_expiry - self.token_expiry_edge
+
+        except (AttributeError, TypeError, ValueError):
+            # expires_in was not an integer
+            self.logger.warning(
+                'SendPulse token expiry limit presumed to be: {}s'.format(
+                    self.token_expiry))
+            expires = self.token_expiry - self.token_expiry_edge
+
+        self.store.set('access_token', access_token, expires=expires)
+
+        return access_token
+
     def send(self, body, title='', notify_type=NotifyType.INFO, attach=None,
              **kwargs):
         """
         Perform SendPulse Notification
         """
 
-        if not self.access_token:
-            # Attempt to acquire acquire a login
-            _payload = {
-                'grant_type': 'client_credentials',
-                'client_id': self.client_id,
-                'client_secret': self.client_secret,
-            }
-
-            success, response = self._fetch(self.notify_oauth_url, _payload)
-            if not success:
-                return False
-
-            # If we get here, we're authenticated
-            self.access_token = response.get('access_token')
-
-        # Store our bearer
-        extended_headers = {
-            'Authorization': 'Bearer {}'.format(self.access_token),
-        }
+        access_token = self.store.get('access_token') or self.login()
+        if not access_token:
+            return False
 
         # error tracking (used for function return)
         has_error = False
@@ -543,14 +580,14 @@ class NotifySendPulse(NotifyBase):
 
             # Perform our post
             success, response = self._fetch(
-                self.notify_email_url, payload, target, extended_headers)
+                self.notify_email_url, payload, target, retry=1)
             if not success:
                 has_error = True
                 continue
 
         return not has_error
 
-    def _fetch(self, url, payload, target=None, extended_headers={}):
+    def _fetch(self, url, payload, target=None, retry=0):
         """
         Wrapper to request.post() to manage it's response better and make
         the send() function cleaner and easier to maintain.
@@ -558,14 +595,14 @@ class NotifySendPulse(NotifyBase):
         This function returns True if the _post was successful and False
         if it wasn't.
         """
-
         headers = {
             'User-Agent': self.app_id,
             'Content-Type': 'application/json',
         }
 
-        if extended_headers:
-            headers.update(extended_headers)
+        access_token = self.store.get('access_token')
+        if access_token:
+            headers.update({'Authorization': f'Bearer {access_token}'})
 
         self.logger.debug('SendPulse POST URL: %s (cert_verify=%r)' % (
             url, self.verify_certificate,
@@ -599,12 +636,20 @@ class NotifySendPulse(NotifyBase):
                     'Response Details:\r\n{}'.format(r.content))
                 return (False, {})
 
-            if r.status_code not in (
+            # Reference status code
+            status_code = r.status_code
+
+            if status_code == requests.codes.unauthorized:
+                # Key likely expired, we'll reset it and try one more time
+                if retry and self.login():
+                    return self._fetch(url, payload, target, retry=retry - 1)
+
+            if status_code not in (
                     requests.codes.ok, requests.codes.accepted):
                 # We had a problem
                 status_str = \
                     NotifySendPulse.http_response_code_lookup(
-                        r.status_code)
+                        status_code)
 
                 if target:
                     self.logger.warning(
@@ -613,14 +658,14 @@ class NotifySendPulse(NotifyBase):
                             target,
                             status_str,
                             ', ' if status_str else '',
-                            r.status_code))
+                            status_code))
                 else:
                     self.logger.warning(
                         'SendPulse Authentication Request failed: '
                         '{}{}error={}.'.format(
                             status_str,
                             ', ' if status_str else '',
-                            r.status_code))
+                            status_code))
 
                 self.logger.debug(
                     'Response Details:\r\n{}'.format(r.content))

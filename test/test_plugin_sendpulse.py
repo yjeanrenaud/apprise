@@ -44,7 +44,8 @@ import logging
 logging.disable(logging.CRITICAL)
 
 SENDPULSE_GOOD_RESPONSE = dumps({
-    "access_token": 'abc123'
+    "access_token": 'abc123',
+    "expires_in": 3600,
 })
 
 SENDPULSE_BAD_RESPONSE = '{'
@@ -352,6 +353,124 @@ def test_plugin_sendpulse_edge_cases(mock_post):
     request.status_code = 403
     assert obj.notify(
         body='body', title='title', notify_type=NotifyType.INFO) is False
+
+    # Test re-authentication
+    mock_post.reset_mock()
+    request = mock.Mock()
+    obj = Apprise.instantiate('sendpulse://usr2@example.com/ci/cs/?from=Retry')
+
+    class sendpulse():
+        def __init__(self):
+            # 200 login okay
+            # 401 on retrival
+            # recursive re-attempt to login returns 200
+            # fetch after works
+            self._side_effect = iter([
+                requests.codes.ok, requests.codes.unauthorized,
+                requests.codes.ok, requests.codes.ok,
+            ])
+
+        @property
+        def status_code(self):
+            return next(self._side_effect)
+
+        @property
+        def content(self):
+            return SENDPULSE_GOOD_RESPONSE
+
+    mock_post.return_value = sendpulse()
+
+    assert obj.notify(
+        body='body', title='title', notify_type=NotifyType.INFO) is True
+
+    assert mock_post.call_count == 4
+    # Authentication
+    assert mock_post.call_args_list[0][0][0] == \
+        'https://api.sendpulse.com/oauth/access_token'
+    # 401 received
+    assert mock_post.call_args_list[1][0][0] == \
+        'https://api.sendpulse.com/smtp/emails'
+    # Re-authenticate
+    assert mock_post.call_args_list[2][0][0] == \
+        'https://api.sendpulse.com/oauth/access_token'
+    # Try again
+    assert mock_post.call_args_list[3][0][0] == \
+        'https://api.sendpulse.com/smtp/emails'
+
+    # Test re-authentication  (no recursive loops)
+    mock_post.reset_mock()
+    request = mock.Mock()
+    obj = Apprise.instantiate('sendpulse://usr2@example.com/ci/cs/?from=Retry')
+
+    class sendpulse():
+        def __init__(self):
+            # oauth always returns okay but notify returns 401
+            # recursive re-attempt only once
+            self._side_effect = iter([
+                requests.codes.ok, requests.codes.unauthorized,
+                requests.codes.ok, requests.codes.unauthorized,
+                requests.codes.ok, requests.codes.unauthorized,
+                requests.codes.ok, requests.codes.unauthorized,
+                requests.codes.ok, requests.codes.unauthorized,
+                requests.codes.ok, requests.codes.unauthorized,
+                requests.codes.ok, requests.codes.unauthorized,
+                requests.codes.ok, requests.codes.unauthorized,
+            ])
+
+        @property
+        def status_code(self):
+            return next(self._side_effect)
+
+        @property
+        def content(self):
+            return SENDPULSE_GOOD_RESPONSE
+
+    mock_post.return_value = sendpulse()
+
+    assert obj.notify(
+        body='body', title='title', notify_type=NotifyType.INFO) is False
+
+    assert mock_post.call_count == 4
+    # Authentication
+    assert mock_post.call_args_list[0][0][0] == \
+        'https://api.sendpulse.com/oauth/access_token'
+    # 401 received
+    assert mock_post.call_args_list[1][0][0] == \
+        'https://api.sendpulse.com/smtp/emails'
+    # Re-authenticate
+    assert mock_post.call_args_list[2][0][0] == \
+        'https://api.sendpulse.com/oauth/access_token'
+    # Last failed attempt
+    assert mock_post.call_args_list[3][0][0] == \
+        'https://api.sendpulse.com/smtp/emails'
+
+    mock_post.side_effect = None
+    request = mock.Mock()
+    request.status_code = requests.codes.ok
+    request.content = SENDPULSE_GOOD_RESPONSE
+    mock_post.return_value = request
+    for expires_in in (None, -1, 'garbage', 3600, 300000):
+        request.content = dumps({
+            "access_token": 'abc123',
+            "expires_in": expires_in,
+        })
+
+        # Instantiate our object
+        obj = Apprise.instantiate('sendpulse://user@example.com/ci/cs/')
+
+        # Test variations of responses
+        obj.notify(
+            body='body', title='title', notify_type=NotifyType.INFO)
+
+        # expires_in is missing
+        request.content = dumps({
+            "access_token": 'abc123',
+        })
+
+        # Instantiate our object
+        obj = Apprise.instantiate('sendpulse://user@example.com/ci/cs/')
+        obj.notify(
+            body='body', title='title', notify_type=NotifyType.INFO) is True
 
 
 def test_plugin_sendpulse_fail_cases():
