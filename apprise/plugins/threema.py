@@ -71,6 +71,9 @@ class NotifyThreema(NotifyBase):
     # Threema Gateway uses the http protocol with JSON requests
     notify_url = 'https://msgapi.threema.ch/send_simple'
 
+    # Threema Gatway for end-to-end encrypted messaging. Also useses the http protocol with JSON requests
+    notify_e22_url =  'ttps://gateway.threema.ch/de/developer/api'
+    
     # The maximum length of the body
     body_maxlen = 3500
 
@@ -79,7 +82,7 @@ class NotifyThreema(NotifyBase):
 
     # Define object templates
     templates = (
-        '{schema}://{gateway_id}@{secret}/{targets}',
+        '{schema}://{gateway_id}@{secret}@{private_key}/{targets}',
     )
 
     # Define our template tokens
@@ -96,6 +99,12 @@ class NotifyThreema(NotifyBase):
             'type': 'string',
             'private': True,
             'required': True,
+        },
+        'private_key': {
+            'name': _('Gateway Private Key'),
+            'type': 'string',
+            'private': True,
+            'required': False, # if not supplied, we fall back to simple text delivery
         },
         'target_phone': {
             'name': _('Target Phone No'),
@@ -135,6 +144,9 @@ class NotifyThreema(NotifyBase):
         'secret': {
             'alias_of': 'secret',
         },
+        'pk': {
+            'alias_of': 'private_key',
+        },
     })
 
     def __init__(self, secret=None, targets=None, **kwargs):
@@ -165,6 +177,15 @@ class NotifyThreema(NotifyBase):
             self.logger.warning(msg)
             raise TypeError(msg)
 
+        # Verify our private key
+        self.private_key = validate_regex(private_key)
+        if not self.private_key:
+            msg = \
+                'An invalid private key to the Threema Gateway ID ({}) was specified. To send  simple texts, please ommit the field private key'.format(
+                    private_key)
+            self.logger.warning(msg)
+            raise Warning(msg) # no need to stop
+        
         # Parse our targets
         self.targets = list()
 
@@ -243,12 +264,22 @@ class NotifyThreema(NotifyBase):
             # Set Target
             payload[key] = target
 
+            # Set Notify URL
+            if self.private_key:
+                notify_url = notify_e2e_url
+                
             # Some Debug Logging
             self.logger.debug(
                 'Threema Gateway GET URL: {} (cert_verify={})'.format(
                     self.notify_url, self.verify_certificate))
             self.logger.debug('Threema Gateway Payload: {}' .format(payload))
 
+             ## REMOVE BEFORE FLIGHT
+            ## YJ TODO all the nonce,box stuff
+            ## see https://github.com/threema-ch/threema-msgapi-sdk-python/blob/master/threema/gateway/e2e.py
+            ## start at def _pk_decrypt(key_pair: Tuple[Key, Key], nonce: bytes, data: bytes):
+            ## /REMOVE BEFORE FLIGHT
+        
             # Always call throttle before any remote server i/o is made
             self.throttle()
 
@@ -317,12 +348,14 @@ class NotifyThreema(NotifyBase):
         params = self.url_parameters(privacy=privacy, *args, **kwargs)
 
         schemaStr =  \
-            '{schema}://{gatewayid}@{secret}/{targets}?{params}'
+            '{schema}://{gatewayid}@{secret}@{private_key}/{targets}?{params}'
         return schemaStr.format(
             schema=self.secure_protocol,
             gatewayid=NotifyThreema.quote(self.user),
             secret=self.pprint(
                 self.secret, privacy, mode=PrivacyMode.Secret, safe=''),
+            private_key=self.pprint(
+                self.private_key, privacy, mode=PrivacyMode.Secret, safe=''),
             targets='/'.join(chain(
                 [NotifyThreema.quote(x[1], safe='@+') for x in self.targets],
                 [NotifyThreema.quote(x, safe='@+')
@@ -357,6 +390,13 @@ class NotifyThreema(NotifyBase):
         else:
             results['secret'] = NotifyThreema.unquote(results['host'])
 
+        if 'pk' in results['qsd'] and len(results['qsd']['pk']):
+            results['pk'] = \
+                NotifyThreema.unquote(results['qsd']['pk'])
+        else:
+            results['pk'] = NotifyThreema.unquote(results['pk'])
+
+        
         results['targets'] += \
             NotifyThreema.split_path(results['fullpath'])
 
