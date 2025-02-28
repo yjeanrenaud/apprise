@@ -82,7 +82,7 @@ class NotifyThreema(NotifyBase):
 
     # Define object templates
     templates = (
-        '{schema}://{gateway_id}@{secret}@{private_key}/{targets}',
+        '{schema}://{gateway_id}@{secret}:{private_key}/{targets}',
     )
 
     # Define our template tokens
@@ -348,7 +348,7 @@ class NotifyThreema(NotifyBase):
         params = self.url_parameters(privacy=privacy, *args, **kwargs)
 
         schemaStr =  \
-            '{schema}://{gatewayid}@{secret}@{private_key}/{targets}?{params}'
+            '{schema}://{gatewayid}@{secret}:{private_key}/{targets}?{params}'
         return schemaStr.format(
             schema=self.secure_protocol,
             gatewayid=NotifyThreema.quote(self.user),
