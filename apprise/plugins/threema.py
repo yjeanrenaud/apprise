@@ -70,6 +70,8 @@ class NotifyThreema(NotifyBase):
 
     # Threema Gateway uses the http protocol with JSON requests
     notify_url = 'https://msgapi.threema.ch/send_simple'
+    # Threema Gateway for end-to-end ncrypted messaging.  also uses the http protocol with JSON requests
+    notffy_url_e2e = 'https://msgapi.threema.ch/send_e2e'
 
     # The maximum length of the body
     body_maxlen = 3500
@@ -79,8 +81,8 @@ class NotifyThreema(NotifyBase):
 
     # Define object templates
     templates = (
-        '{schema}://{gateway_id}@{secret}/{targets}',
-    )
+        '{schema}://{gateway_id}@{secret}@{private_key}/{targets}',
+    ) # we need to get that private key of the gateway's id so we know the user is authorised for sending e2e texts
 
     # Define our template tokens
     template_tokens = dict(NotifyBase.template_tokens, **{
@@ -96,6 +98,12 @@ class NotifyThreema(NotifyBase):
             'type': 'string',
             'private': True,
             'required': True,
+        },
+        'private_key': {
+            'name': _('Gateway Private Key'),
+            'type': 'string',
+            'private': True,
+            'required': False, #if not supplied, we fall back to simple texts messaging
         },
         'target_phone': {
             'name': _('Target Phone No'),
@@ -135,6 +143,9 @@ class NotifyThreema(NotifyBase):
         'secret': {
             'alias_of': 'secret',
         },
+        'pk': {
+            'alias_of': 'private_key',
+        },
     })
 
     def __init__(self, secret=None, targets=None, **kwargs):
@@ -165,6 +176,16 @@ class NotifyThreema(NotifyBase):
             self.logger.warning(msg)
             raise TypeError(msg)
 
+        
+        # Verify our private key
+        self.private_key = validate_regex(private_key)
+        if not self.private_key:
+            msg = \
+                'An invalid or no Threema public key ({}) was specified. attempt to send simple text only'.format(
+                    secret)
+            self.logger.warning(msg)
+            raise TypeWarning(msg)
+        
         # Parse our targets
         self.targets = list()
 
@@ -251,7 +272,9 @@ class NotifyThreema(NotifyBase):
 
             # Always call throttle before any remote server i/o is made
             self.throttle()
-
+            ## YJ TODO: do all the nonce and box stuff!
+            #start with def _pk_encrypt(key_pair: Tuple[Key, Key], data: bytes, nonce: Optional[bytes] = None):
+            
             try:
                 r = requests.post(
                     self.notify_url,
@@ -317,12 +340,14 @@ class NotifyThreema(NotifyBase):
         params = self.url_parameters(privacy=privacy, *args, **kwargs)
 
         schemaStr =  \
-            '{schema}://{gatewayid}@{secret}/{targets}?{params}'
+            '{schema}://{gatewayid}@{secret}@{private_key}/{targets}?{params}'
         return schemaStr.format(
             schema=self.secure_protocol,
             gatewayid=NotifyThreema.quote(self.user),
             secret=self.pprint(
                 self.secret, privacy, mode=PrivacyMode.Secret, safe=''),
+            private_key=self.pprint(
+                self.private_key,privacy, mode=PrivacyMode.Secret, safe=''),
             targets='/'.join(chain(
                 [NotifyThreema.quote(x[1], safe='@+') for x in self.targets],
                 [NotifyThreema.quote(x, safe='@+')
